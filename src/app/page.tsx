@@ -142,15 +142,22 @@ export default function Home() {
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
                   s.status === "ok"
                     ? "bg-green-50 text-green-700"
+                    : s.status === "not_configured"
+                    ? "bg-yellow-50 text-yellow-700"
                     : "bg-red-50 text-red-700"
                 }`}
               >
                 <span
                   className={`w-2 h-2 rounded-full ${
-                    s.status === "ok" ? "bg-green-500" : "bg-red-500"
+                    s.status === "ok"
+                      ? "bg-green-500"
+                      : s.status === "not_configured"
+                      ? "bg-yellow-500"
+                      : "bg-red-500"
                   }`}
                 />
                 {s.source}: {s.count} result{s.count !== 1 ? "s" : ""}
+                {s.status === "not_configured" && " (credentials not set)"}
               </div>
             ))}
           </div>
