@@ -1,41 +1,7 @@
 import { NormalisedTrademark } from "./types";
 
-const TOKEN_URL =
-  "https://production.api.ipaustralia.gov.au/public/external-token-api/v1/access_token";
 const BASE_URL =
   "https://production.api.ipaustralia.gov.au/public/australian-trade-mark-search-api/v1";
-
-let cachedToken: { token: string; expiresAt: number } | null = null;
-
-async function getToken(): Promise<string> {
-  const clientId = process.env.IPAU_CLIENT_ID;
-  const clientSecret = process.env.IPAU_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    throw new Error("not_configured");
-  }
-
-  if (cachedToken && Date.now() < cachedToken.expiresAt) {
-    return cachedToken.token;
-  }
-
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=client_credentials&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}`,
-  });
-
-  if (!res.ok) {
-    throw new Error(`IP Australia auth failed: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
-  cachedToken = {
-    token: data.access_token,
-    expiresAt: Date.now() + 55 * 60 * 1000,
-  };
-  return cachedToken.token;
-}
 
 function findArray(obj: unknown): unknown[] {
   if (Array.isArray(obj)) return obj;
@@ -71,55 +37,45 @@ function extractNumber(item: unknown): string | null {
 export async function searchIPAU(term: string): Promise<{
   results: NormalisedTrademark[];
   error?: string;
-  notConfigured?: boolean;
 }> {
-  let token: string;
   try {
-    token = await getToken();
-  } catch (e) {
-    if (e instanceof Error && e.message === "not_configured") {
-      return {
-        results: [],
-        notConfigured: true,
-        error:
-          "IP Australia not configured. Set IPAU_CLIENT_ID and IPAU_CLIENT_SECRET environment variables. Register free at portal.api.ipaustralia.gov.au",
-      };
-    }
-    return {
-      results: [],
-      error: `IP Australia auth error: ${e instanceof Error ? e.message : String(e)}`,
+    const requestBody = {
+      query: term,
+      filters: { quickSearchType: ["WORD"] },
+      sort: { field: "NUMBER", direction: "DESCENDING" },
     };
-  }
 
-  try {
+    console.log("[IPAU] Searching for:", term);
+    console.log("[IPAU] Request body:", JSON.stringify(requestBody));
+
     const searchRes = await fetch(`${BASE_URL}/search/quick`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
-        Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({
-        query: term,
-        filters: { quickSearchType: ["WORD"] },
-        sort: { field: "NUMBER", direction: "DESCENDING" },
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!searchRes.ok) {
-      const body = await searchRes.text().catch(() => "");
+      const errorBody = await searchRes.text().catch(() => "");
+      console.error(`[IPAU] Search failed: ${searchRes.status} ${searchRes.statusText}`, errorBody);
       return {
         results: [],
-        error: `IP Australia search failed: ${searchRes.status} ${searchRes.statusText} ${body}`,
+        error: `IP Australia search failed (${searchRes.status}): ${errorBody || searchRes.statusText}`,
       };
     }
 
     const searchData = await searchRes.json();
+    console.log("[IPAU] Response keys:", Object.keys(searchData));
+
     const arr = findArray(searchData);
     const numbers = arr
       .map(extractNumber)
       .filter((n): n is string => n !== null)
       .slice(0, 20);
+
+    console.log("[IPAU] Found", numbers.length, "trade mark numbers");
 
     if (numbers.length === 0) {
       return { results: [] };
@@ -128,12 +84,12 @@ export async function searchIPAU(term: string): Promise<{
     const details = await Promise.allSettled(
       numbers.map(async (num) => {
         const res = await fetch(`${BASE_URL}/trade-mark/${num}`, {
-          headers: {
-            Accept: "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { Accept: "application/json" },
         });
-        if (!res.ok) throw new Error(`${res.status}`);
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          throw new Error(`${res.status}: ${errBody}`);
+        }
         const record = await res.json();
         return normalise(record, num);
       })
@@ -148,6 +104,7 @@ export async function searchIPAU(term: string): Promise<{
 
     return { results };
   } catch (e) {
+    console.error("[IPAU] Error:", e);
     return {
       results: [],
       error: `IP Australia error: ${e instanceof Error ? e.message : String(e)}`,
@@ -175,9 +132,8 @@ function normalise(
     id: `AU-${appNumber}`,
     source: "IPAU",
     markName:
-      String(
-        record.name || record.wordMark || record.tradeMarkName || ""
-      ) || "(no word mark)",
+      String(record.name || record.wordMark || record.tradeMarkName || "") ||
+      "(no word mark)",
     owner:
       applicants?.[0]?.name ||
       owners?.[0]?.name ||

@@ -30,15 +30,12 @@ export async function POST(req: NextRequest) {
       })
     );
 
-    const notConfigured = searchResults.some((r) =>
-      r.errors.some((e) => e.includes("not configured"))
-    );
     const hasError = searchResults.some((r) => r.errors.length > 0);
 
     const sourceStatuses: SourceStatus[] = [
       {
         source: "IP Australia",
-        status: notConfigured ? "not_configured" : hasError ? "error" : "ok",
+        status: hasError ? "error" : "ok",
         count: searchResults.reduce((sum, r) => sum + r.results.length, 0),
         message: searchResults.flatMap((r) => r.errors)[0],
       },
