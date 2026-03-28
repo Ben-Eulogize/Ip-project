@@ -1,7 +1,43 @@
 import { NormalisedTrademark } from "./types";
 
+const TOKEN_URL =
+  "https://production.api.ipaustralia.gov.au/public/external-token-api/v1/access_token";
 const BASE_URL =
   "https://production.api.ipaustralia.gov.au/public/australian-trade-mark-search-api/v1";
+
+let cachedToken: { token: string; expiresAt: number } | null = null;
+
+async function getToken(): Promise<string | null> {
+  const clientId = process.env.IPAU_CLIENT_ID;
+  const clientSecret = process.env.IPAU_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  if (cachedToken && Date.now() < cachedToken.expiresAt) {
+    return cachedToken.token;
+  }
+
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=client_credentials&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}`,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error(`[IPAU] Token request failed: ${res.status}`, body);
+    return null;
+  }
+
+  const data = await res.json();
+  cachedToken = {
+    token: data.access_token,
+    expiresAt: Date.now() + 55 * 60 * 1000,
+  };
+  return cachedToken.token;
+}
 
 function findArray(obj: unknown): unknown[] {
   if (Array.isArray(obj)) return obj;
@@ -39,27 +75,43 @@ export async function searchIPAU(term: string): Promise<{
   error?: string;
 }> {
   try {
-    const requestBody = {
-      query: term,
-      filters: { quickSearchType: ["WORD"] },
-      sort: { field: "NUMBER", direction: "DESCENDING" },
-    };
+    const token = await getToken();
 
-    console.log("[IPAU] Searching for:", term);
-    console.log("[IPAU] Request body:", JSON.stringify(requestBody));
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
 
     const searchRes = await fetch(`${BASE_URL}/search/quick`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(requestBody),
+      headers,
+      body: JSON.stringify({
+        query: term,
+        filters: { quickSearchType: ["WORD"] },
+        sort: { field: "NUMBER", direction: "DESCENDING" },
+      }),
     });
 
     if (!searchRes.ok) {
       const errorBody = await searchRes.text().catch(() => "");
-      console.error(`[IPAU] Search failed: ${searchRes.status} ${searchRes.statusText}`, errorBody);
+      console.error(
+        `[IPAU] Search failed: ${searchRes.status}`,
+        errorBody
+      );
+
+      if (searchRes.status === 400 || searchRes.status === 401 || searchRes.status === 403) {
+        const needsAuth = !token;
+        return {
+          results: [],
+          error: needsAuth
+            ? `IP Australia API returned ${searchRes.status}. Set IPAU_CLIENT_ID and IPAU_CLIENT_SECRET in Vercel env vars (register free at portal.api.ipaustralia.gov.au).`
+            : `IP Australia API error ${searchRes.status}: ${errorBody || searchRes.statusText}`,
+        };
+      }
+
       return {
         results: [],
         error: `IP Australia search failed (${searchRes.status}): ${errorBody || searchRes.statusText}`,
@@ -67,24 +119,27 @@ export async function searchIPAU(term: string): Promise<{
     }
 
     const searchData = await searchRes.json();
-    console.log("[IPAU] Response keys:", Object.keys(searchData));
-
     const arr = findArray(searchData);
     const numbers = arr
       .map(extractNumber)
       .filter((n): n is string => n !== null)
       .slice(0, 20);
 
-    console.log("[IPAU] Found", numbers.length, "trade mark numbers");
-
     if (numbers.length === 0) {
       return { results: [] };
+    }
+
+    const detailHeaders: Record<string, string> = {
+      Accept: "application/json",
+    };
+    if (token) {
+      detailHeaders["Authorization"] = `Bearer ${token}`;
     }
 
     const details = await Promise.allSettled(
       numbers.map(async (num) => {
         const res = await fetch(`${BASE_URL}/trade-mark/${num}`, {
-          headers: { Accept: "application/json" },
+          headers: detailHeaders,
         });
         if (!res.ok) {
           const errBody = await res.text().catch(() => "");
