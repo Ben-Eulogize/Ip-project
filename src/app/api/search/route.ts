@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { searchIPAU } from "@/lib/ipau";
-import { searchEUIPO } from "@/lib/euipo";
 import { SearchResult, SourceStatus } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
@@ -15,23 +14,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Cap at 20 terms
     const trimmedTerms = terms.slice(0, 20);
 
     const searchResults: SearchResult[] = await Promise.all(
       trimmedTerms.map(async (term) => {
-        const [ipau, euipo] = await Promise.all([
-          searchIPAU(term),
-          searchEUIPO(term),
-        ]);
-
+        const ipau = await searchIPAU(term);
         const errors: string[] = [];
         if (ipau.error) errors.push(ipau.error);
-        if (euipo.error) errors.push(euipo.error);
 
         return {
           term,
-          results: [...ipau.results, ...euipo.results],
+          results: ipau.results,
           errors,
         };
       })
@@ -40,30 +33,8 @@ export async function POST(req: NextRequest) {
     const sourceStatuses: SourceStatus[] = [
       {
         source: "IP Australia",
-        status: "ok",
-        count: searchResults.reduce(
-          (sum, r) => sum + r.results.filter((x) => x.source === "IPAU").length,
-          0
-        ),
-      },
-      {
-        source: "EUIPO",
-        status: searchResults.some((r) =>
-          r.errors.some((e) => e.includes("not configured"))
-        )
-          ? "not_configured"
-          : searchResults.some((r) =>
-              r.errors.some((e) => e.includes("EUIPO"))
-            )
-          ? "error"
-          : "ok",
-        count: searchResults.reduce(
-          (sum, r) => sum + r.results.filter((x) => x.source === "EUIPO").length,
-          0
-        ),
-        message: searchResults
-          .flatMap((r) => r.errors)
-          .find((e) => e.includes("EUIPO")),
+        status: searchResults.some((r) => r.errors.length > 0) ? "error" : "ok",
+        count: searchResults.reduce((sum, r) => sum + r.results.length, 0),
       },
     ];
 

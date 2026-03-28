@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { SearchResult, SourceStatus, NormalisedTrademark } from "@/lib/types";
+import { SearchResult, SourceStatus } from "@/lib/types";
 import { toJSON, toCSV } from "@/lib/export";
 
 export default function Home() {
@@ -10,9 +10,6 @@ export default function Home() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [sources, setSources] = useState<SourceStatus[]>([]);
   const [expandedTerm, setExpandedTerm] = useState<string | null>(null);
-  const [reportTerm, setReportTerm] = useState<string | null>(null);
-  const [reportContent, setReportContent] = useState("");
-  const [reportLoading, setReportLoading] = useState(false);
 
   const handleSearch = useCallback(async () => {
     const terms = input
@@ -24,8 +21,6 @@ export default function Home() {
     setLoading(true);
     setResults([]);
     setSources([]);
-    setReportTerm(null);
-    setReportContent("");
 
     try {
       const res = await fetch("/api/search", {
@@ -49,52 +44,6 @@ export default function Home() {
       setLoading(false);
     }
   }, [input]);
-
-  const handleReport = useCallback(
-    async (term: string, termResults: NormalisedTrademark[]) => {
-      setReportTerm(term);
-      setReportContent("");
-      setReportLoading(true);
-
-      try {
-        const res = await fetch("/api/report", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ term, results: termResults }),
-        });
-
-        if (!res.ok) {
-          setReportContent(
-            "Failed to generate report. Ensure ANTHROPIC_API_KEY is set."
-          );
-          setReportLoading(false);
-          return;
-        }
-
-        const reader = res.body?.getReader();
-        if (!reader) {
-          setReportContent("No response stream available.");
-          setReportLoading(false);
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let text = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          text += decoder.decode(value, { stream: true });
-          setReportContent(text);
-        }
-      } catch {
-        setReportContent("Failed to generate report.");
-      } finally {
-        setReportLoading(false);
-      }
-    },
-    []
-  );
 
   const allResults = results.flatMap((r) => r.results);
 
@@ -127,7 +76,7 @@ export default function Home() {
                 TM Researcher
               </h1>
               <p className="text-sm text-gray-500 mt-1">
-                Batch trademark search across AU &amp; EU databases
+                Batch trademark search — IP Australia
               </p>
             </div>
             {allResults.length > 0 && (
@@ -151,7 +100,6 @@ export default function Home() {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
-        {/* Search Input */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
           <label
             htmlFor="terms"
@@ -181,12 +129,11 @@ export default function Home() {
               disabled={loading || !input.trim()}
               className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? "Searching..." : "Search All Databases"}
+              {loading ? "Searching..." : "Search IP Australia"}
             </button>
           </div>
         </div>
 
-        {/* Source statuses */}
         {sources.length > 0 && (
           <div className="flex gap-3 mb-6 flex-wrap">
             {sources.map((s) => (
@@ -195,38 +142,29 @@ export default function Home() {
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
                   s.status === "ok"
                     ? "bg-green-50 text-green-700"
-                    : s.status === "not_configured"
-                    ? "bg-yellow-50 text-yellow-700"
                     : "bg-red-50 text-red-700"
                 }`}
               >
                 <span
                   className={`w-2 h-2 rounded-full ${
-                    s.status === "ok"
-                      ? "bg-green-500"
-                      : s.status === "not_configured"
-                      ? "bg-yellow-500"
-                      : "bg-red-500"
+                    s.status === "ok" ? "bg-green-500" : "bg-red-500"
                   }`}
                 />
                 {s.source}: {s.count} result{s.count !== 1 ? "s" : ""}
-                {s.status === "not_configured" && " (not configured)"}
               </div>
             ))}
           </div>
         )}
 
-        {/* Loading */}
         {loading && (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
             <span className="ml-3 text-gray-600">
-              Searching databases in parallel...
+              Searching IP Australia...
             </span>
           </div>
         )}
 
-        {/* Results */}
         {results.length > 0 && (
           <div className="space-y-4">
             {results.map((sr) => (
@@ -249,32 +187,21 @@ export default function Home() {
                       {sr.results.length !== 1 ? "s" : ""}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleReport(sr.term, sr.results);
-                      }}
-                      className="px-3 py-1 text-xs bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 transition-colors font-medium"
-                    >
-                      AI Report
-                    </button>
-                    <svg
-                      className={`w-5 h-5 text-gray-400 transition-transform ${
-                        expandedTerm === sr.term ? "rotate-180" : ""
-                      }`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 9l-7 7-7-7"
-                      />
-                    </svg>
-                  </div>
+                  <svg
+                    className={`w-5 h-5 text-gray-400 transition-transform ${
+                      expandedTerm === sr.term ? "rotate-180" : ""
+                    }`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 9l-7 7-7-7"
+                    />
+                  </svg>
                 </button>
 
                 {sr.errors.length > 0 && (
@@ -296,7 +223,6 @@ export default function Home() {
                           <th className="px-6 py-3">Owner</th>
                           <th className="px-6 py-3">Status</th>
                           <th className="px-6 py-3">Classes</th>
-                          <th className="px-6 py-3">Source</th>
                           <th className="px-6 py-3">App Date</th>
                           <th className="px-6 py-3">Link</th>
                         </tr>
@@ -333,17 +259,6 @@ export default function Home() {
                             <td className="px-6 py-3 text-gray-600">
                               {tm.niceClasses.join(", ") || "\u2014"}
                             </td>
-                            <td className="px-6 py-3">
-                              <span
-                                className={`inline-block px-2 py-0.5 text-xs rounded font-medium ${
-                                  tm.source === "IPAU"
-                                    ? "bg-blue-50 text-blue-700"
-                                    : "bg-indigo-50 text-indigo-700"
-                                }`}
-                              >
-                                {tm.source === "IPAU" ? "AU" : "EU"}
-                              </span>
-                            </td>
                             <td className="px-6 py-3 text-gray-600 whitespace-nowrap">
                               {tm.appDate || "\u2014"}
                             </td>
@@ -373,47 +288,6 @@ export default function Home() {
                 )}
               </div>
             ))}
-          </div>
-        )}
-
-        {/* AI Report Panel */}
-        {reportTerm && (
-          <div className="mt-6 bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">
-                AI Landscape Report: &ldquo;{reportTerm}&rdquo;
-              </h2>
-              <button
-                onClick={() => {
-                  setReportTerm(null);
-                  setReportContent("");
-                }}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </button>
-            </div>
-            {reportLoading && !reportContent && (
-              <div className="flex items-center gap-2 text-gray-500">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-600" />
-                Generating report...
-              </div>
-            )}
-            <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap">
-              {reportContent}
-            </div>
           </div>
         )}
       </div>
