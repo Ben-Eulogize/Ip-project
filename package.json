@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "search": "tsx --env-file=.env scripts/search.ts"
+    "search": "tsx --env-file=.env.local scripts/search.ts",
+    "check": "tsx --env-file=.env.local scripts/check.ts"
   },
   "dependencies": {
     "next": "14.2.35",
