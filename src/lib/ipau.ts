@@ -7,16 +7,21 @@ const BASE_URL =
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
-async function getToken(): Promise<string | null> {
+type TokenResult =
+  | { kind: "ok"; token: string }
+  | { kind: "missing" }
+  | { kind: "error"; status: number; body: string };
+
+async function getToken(): Promise<TokenResult> {
   const clientId = process.env.IPAU_CLIENT_ID;
   const clientSecret = process.env.IPAU_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    return null;
+    return { kind: "missing" };
   }
 
   if (cachedToken && Date.now() < cachedToken.expiresAt) {
-    return cachedToken.token;
+    return { kind: "ok", token: cachedToken.token };
   }
 
   const res = await fetch(TOKEN_URL, {
@@ -28,7 +33,7 @@ async function getToken(): Promise<string | null> {
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     console.error(`[IPAU] Token request failed: ${res.status}`, body);
-    return null;
+    return { kind: "error", status: res.status, body };
   }
 
   const data = await res.json();
@@ -36,7 +41,7 @@ async function getToken(): Promise<string | null> {
     token: data.access_token,
     expiresAt: Date.now() + 55 * 60 * 1000,
   };
-  return cachedToken.token;
+  return { kind: "ok", token: cachedToken.token };
 }
 
 function findArray(obj: unknown): unknown[] {
@@ -75,19 +80,32 @@ export async function searchIPAU(term: string): Promise<{
   error?: string;
 }> {
   try {
-    const token = await getToken();
+    const tokenResult = await getToken();
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+    if (tokenResult.kind === "missing") {
+      return {
+        results: [],
+        error:
+          "IP Australia credentials not configured. Set IPAU_CLIENT_ID and IPAU_CLIENT_SECRET in Vercel env vars (register free at portal.api.ipaustralia.gov.au).",
+      };
     }
+
+    if (tokenResult.kind === "error") {
+      return {
+        results: [],
+        error: `IP Australia token request failed (${tokenResult.status}): ${tokenResult.body || "check IPAU_CLIENT_ID and IPAU_CLIENT_SECRET are correct"}`,
+      };
+    }
+
+    const token = tokenResult.token;
 
     const searchRes = await fetch(`${BASE_URL}/search/quick`, {
       method: "POST",
-      headers,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         query: term,
         filters: { quickSearchType: ["WORD"] },
@@ -97,21 +115,7 @@ export async function searchIPAU(term: string): Promise<{
 
     if (!searchRes.ok) {
       const errorBody = await searchRes.text().catch(() => "");
-      console.error(
-        `[IPAU] Search failed: ${searchRes.status}`,
-        errorBody
-      );
-
-      if (searchRes.status === 400 || searchRes.status === 401 || searchRes.status === 403) {
-        const needsAuth = !token;
-        return {
-          results: [],
-          error: needsAuth
-            ? `IP Australia API returned ${searchRes.status}. Set IPAU_CLIENT_ID and IPAU_CLIENT_SECRET in Vercel env vars (register free at portal.api.ipaustralia.gov.au).`
-            : `IP Australia API error ${searchRes.status}: ${errorBody || searchRes.statusText}`,
-        };
-      }
-
+      console.error(`[IPAU] Search failed: ${searchRes.status}`, errorBody);
       return {
         results: [],
         error: `IP Australia search failed (${searchRes.status}): ${errorBody || searchRes.statusText}`,
@@ -129,17 +133,13 @@ export async function searchIPAU(term: string): Promise<{
       return { results: [] };
     }
 
-    const detailHeaders: Record<string, string> = {
-      Accept: "application/json",
-    };
-    if (token) {
-      detailHeaders["Authorization"] = `Bearer ${token}`;
-    }
-
     const details = await Promise.allSettled(
       numbers.map(async (num) => {
         const res = await fetch(`${BASE_URL}/trade-mark/${num}`, {
-          headers: detailHeaders,
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${token}`,
+          },
         });
         if (!res.ok) {
           const errBody = await res.text().catch(() => "");
