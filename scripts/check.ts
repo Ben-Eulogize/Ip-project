@@ -119,7 +119,7 @@ async function main() {
     console.log(`  Auto-detected:     ${report.detectedClasses.map((c) => `Class ${c}`).join(", ")}`);
   }
   console.log(`  Data source:       ${report.source === "live" ? "IP Australia (live)" : "Demo fixtures"}`);
-  console.log(`  Queries fired:     ${report.searchedQueries.length} (${report.rawHitCount} raw hits → ${report.findings.length} scored)`);
+  console.log(`  IPAU coverage:     ${report.totalAvailable} total matches in IPAU, ${report.fetched} fetched, ${report.findings.length} scored`);
   if (report.warnings.length) {
     console.log("");
     console.log("  Warnings:");
@@ -163,7 +163,7 @@ async function main() {
     console.log("");
   }
 
-  console.log(`  Variants searched: ${report.searchedQueries.join(" | ")}`);
+  console.log(`  Classes searched: ${report.searchedClasses.join(", ") || "(any)"}`);
   console.log(bar);
   console.log("");
 }

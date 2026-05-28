@@ -44,196 +44,203 @@ async function getToken(): Promise<TokenResult> {
   return { kind: "ok", token: cachedToken.token };
 }
 
-function findArray(obj: unknown): unknown[] {
-  if (Array.isArray(obj)) return obj;
-  if (obj && typeof obj === "object") {
-    // trademarkIds is the canonical key on the live /search/quick
-    // response — array of numeric-string app numbers.
-    for (const key of ["trademarkIds", "tradeMarks", "results", "data", "body"]) {
-      const val = (obj as Record<string, unknown>)[key];
-      if (Array.isArray(val)) return val;
-    }
-    for (const val of Object.values(obj as Record<string, unknown>)) {
-      if (Array.isArray(val)) return val;
-    }
-  }
-  return [];
-}
+// /page/advanced — request shape per the official OAS spec. Each row is
+// an AND/OR/AND_NOT-combined sub-query; the inner query supports word,
+// image, classNumber, owner, date, statuses, kinds, etc. The endpoint
+// returns full detail records inline (no N+1 fan-out).
+type AdvancedQuery = {
+  word?: { text: string; type: WordMatchType };
+  image?: { text: string; type: "EXACT" | "PART" };
+  classNumber?: { text: string; type: "SINGLE" | "ASSOCIATED" | "ASSOCIATED_PRE_2012" };
+  goodsAndServices?: string;
+  owner?: string;
+  trademarkNumber?: string;
+  irNumber?: string;
+  statuses?: AdvancedStatus[];
+  kinds?: MarkKind[];
+};
 
-function extractNumber(item: unknown): string | null {
-  if (typeof item === "string") return item;
-  if (typeof item === "number") return String(item);
-  if (item && typeof item === "object") {
-    const obj = item as Record<string, unknown>;
-    for (const key of [
-      "applicationNumber",
-      "number",
-      "tradeMarkNumber",
-      "id",
-    ]) {
-      if (obj[key] != null) return String(obj[key]);
-    }
-  }
-  return null;
-}
+export type WordMatchType =
+  | "EXACT"
+  | "PREFIX"
+  | "PART"
+  | "SUFFIX"
+  | "PHONETIC"
+  | "FUZZY"
+  | "STEM"
+  | "NON_WILDCARD_EXACT"
+  | "WORD_ONLY_EXACT"
+  | "TRANSLITERATION_EXACT";
 
-// Detail-fetch budget per variant query. Total per check ≈
-// (per-variant detail count) × (variant count) + (variant count for
-// search calls). With ~4 variants × 30 details + 4 searches = ~124
-// requests vs the 600/min SLA on the Base Tier.
-const DETAIL_LIMIT_PER_DIRECTION = 15;
+export type AdvancedStatus =
+  | "PENDING_REGISTERED_REFUSED"
+  | "PENDING_REGISTERED"
+  | "PENDING"
+  | "REGISTERED"
+  | "REFUSED"
+  | "REMOVED"
+  | "NEVER_REGISTERED"
+  | "DISCONTINUED";
 
-// Sort directions to fan out — captures both new pending applications
-// (DESCENDING by app number = newest first) and long-standing registered
-// marks (ASCENDING = oldest first). For brand-name searches like
-// "PAULS" with 500+ hits, NUMBER-descending alone misses 1990s-era
-// registrations that are often the strongest legal conflicts.
-type SortDir = "ASCENDING" | "DESCENDING";
+export type MarkKind =
+  | "WORD"
+  | "FIGURATIVE"
+  | "FANCY"
+  | "COLOUR"
+  | "SCENT"
+  | "SHAPE"
+  | "SOUND"
+  | "MOVEMENT"
+  | "FEEL"
+  | "HOLOGRAM"
+  | "POSITION"
+  | "TASTE"
+  | "TRACER"
+  | "OTHER";
 
-async function searchOnce(
-  token: string,
-  term: string,
-  direction: SortDir
-): Promise<{ ids: string[]; error?: string }> {
-  const res = await fetch(`${BASE_URL}/search/quick`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      query: term,
-      // Filter at search time to live/pending — REMOVED, REFUSED, and
-      // NEVER_REGISTERED add noise that the risk scorer would weight to
-      // MINIMAL anyway. Saves ~50% of detail-fetch budget on common
-      // queries.
-      filters: {
-        quickSearchType: ["WORD"],
-        status: ["REGISTERED", "PENDING"],
-      },
-      sort: { field: "NUMBER", direction },
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
+export type AdvancedRow = {
+  op: "AND" | "OR" | "AND_NOT";
+  query: AdvancedQuery;
+};
+
+export type AdvancedSearchInput = {
+  word?: string;
+  wordMatchType?: WordMatchType;
+  classes?: number[];
+  imageKeywords?: string; // Vienna-style image description tokens — e.g. "STAR,CIRCLE,RED"
+  // Restrict to live/pending by default; expand if caller passes otherwise.
+  statuses?: AdvancedStatus[];
+  pageSize?: number;
+};
+
+/**
+ * Run an advanced search via /page/advanced. Returns full detail records
+ * inline — no N+1 fan-out to /trade-mark/{id}. Handles status filtering
+ * and Nice class filtering at search time so the result set is already
+ * risk-relevant.
+ */
+export async function searchAdvanced(
+  input: AdvancedSearchInput
+): Promise<{ results: NormalisedTrademark[]; total: number; error?: string }> {
+  const tokenResult = await getToken();
+  if (tokenResult.kind === "missing") {
     return {
-      ids: [],
-      error: `IP Australia search failed (${res.status}): ${body || res.statusText}`,
+      results: [],
+      total: 0,
+      error:
+        "IP Australia credentials not configured. Set IPAU_CLIENT_ID and IPAU_CLIENT_SECRET in Vercel env vars.",
     };
   }
-  const data = await res.json();
-  const arr = findArray(data);
-  const ids = arr
-    .map(extractNumber)
-    .filter((n): n is string => n !== null)
-    .slice(0, DETAIL_LIMIT_PER_DIRECTION);
-  return { ids };
+  if (tokenResult.kind === "error") {
+    return {
+      results: [],
+      total: 0,
+      error: `IP Australia token request failed (${tokenResult.status}): ${tokenResult.body || "check credentials"}`,
+    };
+  }
+
+  const token = tokenResult.token;
+  const statuses = input.statuses ?? ["REGISTERED", "PENDING"];
+  const pageSize = Math.min(input.pageSize ?? 50, 100);
+
+  // Build one row per intended class. If no classes specified, single row
+  // with no class filter. Rows are OR-joined so any class-row matching
+  // pulls the mark in.
+  const rows: AdvancedRow[] = [];
+  const classes = input.classes && input.classes.length ? input.classes : [null];
+  for (const cls of classes) {
+    const query: AdvancedQuery = { statuses };
+    if (input.word) {
+      query.word = {
+        text: input.word,
+        type: input.wordMatchType ?? "STEM",
+      };
+    }
+    if (input.imageKeywords && input.imageKeywords.trim()) {
+      query.image = { text: input.imageKeywords.trim(), type: "PART" };
+    }
+    if (cls != null) {
+      query.classNumber = { text: String(cls), type: "SINGLE" };
+    }
+    rows.push({ op: rows.length === 0 ? "AND" : "OR", query });
+  }
+
+  const body = {
+    pageSize,
+    pageNumber: 0,
+    sort: { field: "NUMBER", direction: "DESCENDING" as const },
+    rows,
+  };
+
+  try {
+    const res = await fetch(`${BASE_URL}/page/advanced`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      console.error(`[IPAU] /page/advanced failed: ${res.status}`, errBody);
+      return {
+        results: [],
+        total: 0,
+        error: `IP Australia advanced search failed (${res.status}): ${errBody || res.statusText}`,
+      };
+    }
+    const data = await res.json();
+    const raw = Array.isArray(data?.trademarks) ? data.trademarks : [];
+    const total = typeof data?.count === "number" ? data.count : raw.length;
+    // Drop the negative-ID prohibited-marks rows — they're noise for a
+    // commercial availability check.
+    const results: NormalisedTrademark[] = raw
+      .filter((tm: { number?: unknown }) => {
+        const n = Number(tm.number);
+        return Number.isFinite(n) && n > 0;
+      })
+      .map((tm: Record<string, unknown>) => normalise(tm, String(tm.number)));
+    return { results, total };
+  } catch (e) {
+    console.error("[IPAU] /page/advanced error:", e);
+    return {
+      results: [],
+      total: 0,
+      error: `IP Australia error: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
 }
 
+/**
+ * Legacy single-term searcher — kept for the batch UI at /batch. Wraps
+ * the new advanced search using STEM word matching (the closest analog
+ * to ATMOSS's default behaviour). The risk-classifier uses
+ * searchAdvanced directly.
+ */
 export async function searchIPAU(term: string): Promise<{
   results: NormalisedTrademark[];
   error?: string;
 }> {
-  try {
-    const tokenResult = await getToken();
-
-    if (tokenResult.kind === "missing") {
-      return {
-        results: [],
-        error:
-          "IP Australia credentials not configured. Set IPAU_CLIENT_ID and IPAU_CLIENT_SECRET in Vercel env vars (register free at portal.api.ipaustralia.gov.au).",
-      };
-    }
-
-    if (tokenResult.kind === "error") {
-      return {
-        results: [],
-        error: `IP Australia token request failed (${tokenResult.status}): ${tokenResult.body || "check IPAU_CLIENT_ID and IPAU_CLIENT_SECRET are correct"}`,
-      };
-    }
-
-    const token = tokenResult.token;
-
-    // Two-direction sweep: oldest registered marks + newest pending apps.
-    const [descRes, ascRes] = await Promise.all([
-      searchOnce(token, term, "DESCENDING"),
-      searchOnce(token, term, "ASCENDING"),
-    ]);
-
-    if (descRes.error && ascRes.error) {
-      return { results: [], error: descRes.error };
-    }
-
-    const seenIds = new Set<string>();
-    const numbers: string[] = [];
-    for (const id of [...descRes.ids, ...ascRes.ids]) {
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-      numbers.push(id);
-    }
-
-    if (numbers.length === 0) {
-      return { results: [] };
-    }
-
-    const details = await Promise.allSettled(
-      numbers.map(async (num) => {
-        const res = await fetch(`${BASE_URL}/trade-mark/${num}`, {
-          headers: {
-            Accept: "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-        });
-        if (!res.ok) {
-          const errBody = await res.text().catch(() => "");
-          throw new Error(`${res.status}: ${errBody}`);
-        }
-        const record = await res.json();
-        return normalise(record, num);
-      })
-    );
-
-    const results: NormalisedTrademark[] = details
-      .filter(
-        (d): d is PromiseFulfilledResult<NormalisedTrademark> =>
-          d.status === "fulfilled"
-      )
-      .map((d) => d.value);
-
-    return { results };
-  } catch (e) {
-    console.error("[IPAU] Error:", e);
-    return {
-      results: [],
-      error: `IP Australia error: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
+  const r = await searchAdvanced({ word: term, wordMatchType: "STEM" });
+  return { results: r.results, error: r.error };
 }
 
 function normalise(
   record: Record<string, unknown>,
   fallbackNumber: string
 ): NormalisedTrademark {
-  // Real IPAU /trade-mark/{n} response uses `number` (numeric), `words`
-  // (array of mark text strings), `owner` (array of {name,...}),
-  // `statusGroup` + `statusCode` + `statusDetail`, and `goodsAndServices`
-  // (array of {class, descriptionText}). Fields fall through to other
-  // names defensively in case the API ever changes.
-
   const appNumber = String(
     record.number || record.applicationNumber || fallbackNumber
   );
 
-  // Mark name: prefer joined `words`, fall back to legacy keys.
   const words = record.words as string[] | undefined;
   const markName =
     (Array.isArray(words) && words.length ? words.join(" / ") : "") ||
     String(record.name || record.wordMark || record.tradeMarkName || "") ||
     "(no word mark)";
 
-  // Owner: `owner` is an array of party objects, OR (legacy) a single
-  // object or `applicants` / `owners` arrays.
   const ownerArr =
     (Array.isArray(record.owner) ? (record.owner as Array<{ name?: string }>) : undefined) ||
     (record.owners as Array<{ name?: string }> | undefined) ||
@@ -241,32 +248,25 @@ function normalise(
   const ownerSingle = !Array.isArray(record.owner)
     ? (record.owner as { name?: string } | undefined)
     : undefined;
-  const owner =
-    ownerArr?.[0]?.name || ownerSingle?.name || "Unknown";
+  const owner = ownerArr?.[0]?.name || ownerSingle?.name || "Unknown";
 
-  // Status: prefer statusGroup (REGISTERED/PENDING/REMOVED/REFUSED/
-  // NEVER_REGISTERED) and tack on statusDetail when present so the UI
-  // shows e.g. "REGISTERED — Registered: registered/protected".
   const statusGroup = record.statusGroup ? String(record.statusGroup) : "";
   const statusDetail = record.statusDetail ? String(record.statusDetail) : "";
   const status =
     [statusGroup, statusDetail].filter(Boolean).join(" — ") ||
     String(record.status || "UNKNOWN");
 
-  // Nice classes: from goodsAndServices[].class, deduped, sorted numeric.
   const gAndS =
     (record.goodsAndServices as Array<{ class?: unknown }> | undefined) || [];
   const niceClasses = Array.from(
     new Set(
       gAndS
         .map((g) => g?.class)
-        .filter((c) => c != null && c !== "")
+        .filter((c) => c != null && c !== "" && c !== "All")
         .map(String)
     )
   ).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
 
-  // Dates: lodgementDate / filingDate are usually the same; pick one.
-  // enteredOnRegisterDate or registeredFromDate marks registration.
   const appDate =
     (record.lodgementDate as string | null) ||
     (record.filingDate as string | null) ||
@@ -277,6 +277,21 @@ function normalise(
     (record.registeredFromDate as string | null) ||
     (record.registrationDate as string | null) ||
     null;
+
+  // Image data — figurative marks have CDN thumbnail URLs and
+  // Vienna-style description keywords.
+  const imagesObj = record.images as
+    | { description?: string[]; images?: string[] }
+    | undefined;
+  const imageUrls = Array.isArray(imagesObj?.images)
+    ? imagesObj!.images!.filter((u): u is string => typeof u === "string")
+    : [];
+  const imageDescription = Array.isArray(imagesObj?.description)
+    ? imagesObj!.description!.filter((d): d is string => typeof d === "string")
+    : [];
+
+  const kindsArr = record.kind as string[] | undefined;
+  const kinds = Array.isArray(kindsArr) ? kindsArr : [];
 
   return {
     id: `AU-${appNumber}`,
@@ -289,6 +304,9 @@ function normalise(
     regDate,
     jurisdiction: "AU",
     externalUrl: `https://search.ipaustralia.gov.au/trademarks/search/view/${appNumber}/details`,
+    imageUrls,
+    imageDescription,
+    kinds,
     rawData: record,
   };
 }

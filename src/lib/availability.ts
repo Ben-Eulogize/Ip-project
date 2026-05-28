@@ -1,17 +1,24 @@
 import { NormalisedTrademark } from "./types";
-import { searchIPAU } from "./ipau";
+import { searchAdvanced, AdvancedStatus } from "./ipau";
 import { mockSearchIPAU } from "./mock-data";
-import { generateVariants, generateAlternativeNames } from "./variants";
-import { scoreTrademark, RiskFinding, compareFindings, LEVEL_ORDER, RiskLevel } from "./risk";
+import { generateAlternativeNames, distinctiveOf } from "./variants";
+import {
+  scoreTrademark,
+  RiskFinding,
+  compareFindings,
+  LEVEL_ORDER,
+  RiskLevel,
+} from "./risk";
 import { detectClasses, getNiceClass, relatedClasses } from "./nice-classes";
 
 export type AvailabilityRequest = {
   candidate: string;
-  // Intended Nice classes. If empty, we attempt auto-detection from
-  // `productDescription` (or from the candidate text).
   intendedClasses?: number[];
   productDescription?: string;
-  // Force demo data — used when the API isn't subscribed yet.
+  // Visual-element keywords for figurative-mark search. Comma-separated
+  // Vienna-style descriptors — e.g. "STAR,CIRCLE,RED". When set, an
+  // additional image-search row is added to the advanced query.
+  imageKeywords?: string;
   forceMock?: boolean;
 };
 
@@ -19,23 +26,24 @@ export type AvailabilityReport = {
   candidate: string;
   intendedClasses: number[];
   detectedClasses: number[];
-  // Top-level traffic light derived from the worst single finding.
   overall: RiskLevel;
   findings: RiskFinding[];
-  // Suggestion blocks for the UI.
   alternativeNames: string[];
   saferClasses: { class: number; heading: string; reason: string }[];
-  // Diagnostics so the UI can surface what happened.
-  searchedQueries: string[];
-  rawHitCount: number;
+  // Diagnostics surfaced in the UI.
+  searchedClasses: number[];
+  totalAvailable: number; // total hits across all per-class queries (pre-pagination)
+  fetched: number; // count actually pulled
   source: "live" | "mock";
   liveApiError: string | null;
   warnings: string[];
 };
 
-// Hard cap on total findings returned to the UI. Most users care about
-// the top ~30; beyond that the list is noise.
-const MAX_FINDINGS = 60;
+// Max records to score per check. Higher = more thorough, more risk-list
+// noise. 100 is generous and the /page/advanced endpoint can return all
+// of them in one call (no N+1).
+const MAX_FINDINGS = 80;
+const PAGE_SIZE_PER_CLASS = 50;
 
 function dedupe(hits: NormalisedTrademark[]): NormalisedTrademark[] {
   const seen = new Set<string>();
@@ -48,7 +56,10 @@ function dedupe(hits: NormalisedTrademark[]): NormalisedTrademark[] {
   return out;
 }
 
-function resolveClasses(req: AvailabilityRequest): { intended: number[]; detected: number[] } {
+function resolveClasses(req: AvailabilityRequest): {
+  intended: number[];
+  detected: number[];
+} {
   const detected = detectClasses(
     `${req.productDescription || ""} ${req.candidate}`
   );
@@ -62,30 +73,95 @@ function resolveClasses(req: AvailabilityRequest): { intended: number[]; detecte
 export async function checkAvailability(
   req: AvailabilityRequest
 ): Promise<AvailabilityReport> {
-  const variants = generateVariants(req.candidate);
   const { intended, detected } = resolveClasses(req);
-
   const useMock =
     req.forceMock === true || process.env.IPAU_MOCK_MODE === "true";
-
-  const search = useMock ? mockSearchIPAU : searchIPAU;
 
   const warnings: string[] = [];
   let liveApiError: string | null = null;
   let actualSource: "live" | "mock" = useMock ? "mock" : "live";
 
-  // Fan out variants in parallel. Cap concurrency by virtue of the
-  // bounded query list inside generateVariants().
-  const searchResults = await Promise.all(
-    variants.queries.map(async (q) => {
-      const r = await search(q);
-      return { query: q, ...r };
-    })
-  );
+  const statuses: AdvancedStatus[] = ["REGISTERED", "PENDING"];
 
-  // If we're on live and EVERY query failed with the same "Invalid Client"
-  // body, auto-fall-back to mock and surface the diagnostic. This keeps
-  // the demo usable while Ben sorts the portal subscription.
+  // Strategy:
+  //   - For each intended class: one advanced search with STEM word match
+  //     + classNumber filter + status filter. Returns up to 50 full
+  //     records inline. Catches Paul/Pauls/Paul's variants automatically.
+  //   - Plus one unrestricted-class STEM search to surface any strong-
+  //     name collisions in unrelated classes (the risk-scorer downgrades
+  //     these to LOW automatically; we just want them visible).
+  //   - Plus, if imageKeywords supplied, one image-search row.
+  // Total API calls = (intended classes) + 1 + (image: 0 or 1). Typically
+  // 2–4 calls per check.
+  const searches: Array<Promise<{ results: NormalisedTrademark[]; total: number; error?: string }>> = [];
+  const queryDescriptions: string[] = [];
+
+  // IPAU's word search expects a SINGLE token, not a phrase. Extract the
+  // distinctive tokens (drop descriptors like "Lemonade", "Drinks") and
+  // run STEM searches per token. If the candidate has no distinctive
+  // tokens after stripping (e.g. pure descriptor), fall back to the
+  // whole candidate string — IPAU will return zero hits, which is the
+  // correct signal for a generic name.
+  const tokensForSearch = req.candidate.trim()
+    ? distinctiveOf(req.candidate).length > 0
+      ? distinctiveOf(req.candidate)
+      : [req.candidate.trim().split(/\s+/)[0]]
+    : [];
+
+  if (useMock) {
+    searches.push(mockSearchIPAU(req.candidate).then((r) => ({ ...r, total: r.results.length })));
+    queryDescriptions.push(`mock("${req.candidate}")`);
+  } else {
+    // Per-token × per-class STEM searches.
+    for (const token of tokensForSearch) {
+      if (intended.length > 0) {
+        for (const cls of intended) {
+          searches.push(
+            searchAdvanced({
+              word: token,
+              wordMatchType: "STEM",
+              classes: [cls],
+              statuses,
+              pageSize: PAGE_SIZE_PER_CLASS,
+            })
+          );
+          queryDescriptions.push(`STEM "${token}" in Cl ${cls}`);
+        }
+      }
+      // Unrestricted class — catches strong-name conflicts in unrelated
+      // classes (the risk-scorer downgrades these but they should be
+      // visible).
+      searches.push(
+        searchAdvanced({
+          word: token,
+          wordMatchType: "STEM",
+          statuses,
+          pageSize: PAGE_SIZE_PER_CLASS,
+        })
+      );
+      queryDescriptions.push(`STEM "${token}" (any class)`);
+    }
+    // Image-keyword search.
+    if (req.imageKeywords && req.imageKeywords.trim()) {
+      searches.push(
+        searchAdvanced({
+          imageKeywords: req.imageKeywords,
+          classes: intended.length ? intended : undefined,
+          statuses,
+          pageSize: PAGE_SIZE_PER_CLASS,
+        })
+      );
+      queryDescriptions.push(
+        `image keywords "${req.imageKeywords.trim()}"${
+          intended.length ? ` in Cl ${intended.join(", ")}` : ""
+        }`
+      );
+    }
+  }
+
+  const searchResults = await Promise.all(searches);
+
+  // Detect the "client not subscribed" 403 and auto-fallback to mock.
   if (!useMock) {
     const allErr = searchResults.every((r) => r.error);
     const invalidClient = searchResults.some((r) =>
@@ -93,20 +169,13 @@ export async function checkAvailability(
     );
     if (allErr && invalidClient) {
       liveApiError =
-        "IP Australia API rejected all requests with 403 'Invalid Client'. Token issued fine — but the client (b2b_ipLookup_prod) is not yet subscribed to the Trade Mark Search API product. Subscribe in the portal at portal.api.ipaustralia.gov.au → API Products. Falling back to demo data so you can see the prototype.";
+        "IP Australia API rejected all requests with 403 'Invalid Client'. The client is not subscribed to the Trade Mark Search API product. Subscribe in the portal at portal.api.ipaustralia.gov.au → API Products. Falling back to demo data.";
       warnings.push(liveApiError);
-      // Re-run with mock.
-      const mockResults = await Promise.all(
-        variants.queries.map(async (q) => {
-          const r = await mockSearchIPAU(q);
-          return { query: q, ...r };
-        })
-      );
+      const mockRes = await mockSearchIPAU(req.candidate);
       searchResults.length = 0;
-      searchResults.push(...mockResults);
+      searchResults.push({ results: mockRes.results, total: mockRes.results.length });
       actualSource = "mock";
     } else if (allErr) {
-      // Different error — surface it but don't auto-mock.
       const errs = Array.from(
         new Set(searchResults.map((r) => r.error).filter(Boolean) as string[])
       );
@@ -116,30 +185,29 @@ export async function checkAvailability(
   }
 
   const allHits = searchResults.flatMap((r) => r.results);
-  const rawHitCount = allHits.length;
+  const totalAvailable = searchResults.reduce((sum, r) => sum + (r.total || 0), 0);
   const uniqueHits = dedupe(allHits);
+  const fetched = uniqueHits.length;
 
-  // Score every unique hit. Filter out MINIMAL-with-score-0 noise from
-  // very weak matches that the search returned because the search engine
-  // tokenises differently to our scorer.
   const findings = uniqueHits
-    .map((tm) => scoreTrademark({ candidate: req.candidate, intendedClasses: intended }, tm))
+    .map((tm) =>
+      scoreTrademark({ candidate: req.candidate, intendedClasses: intended }, tm)
+    )
     .filter((f) => f.score >= 5)
     .sort(compareFindings)
     .slice(0, MAX_FINDINGS);
 
-  // Overall = worst level present, defaulting to MINIMAL if no findings.
   const overall: RiskLevel =
     findings.length === 0
       ? "MINIMAL"
       : findings.reduce<RiskLevel>(
           (worst, f) =>
-            LEVEL_ORDER.indexOf(f.level) < LEVEL_ORDER.indexOf(worst) ? f.level : worst,
+            LEVEL_ORDER.indexOf(f.level) < LEVEL_ORDER.indexOf(worst)
+              ? f.level
+              : worst,
           "MINIMAL"
         );
 
-  // Suggest alternative names — blocked tokens are the distinctive tokens
-  // that show up in any HIGH+ finding's mark name.
   const blockedTokens = new Set<string>();
   for (const f of findings) {
     if (f.level === "CRITICAL" || f.level === "HIGH") {
@@ -151,10 +219,6 @@ export async function checkAvailability(
   }
   const alternativeNames = generateAlternativeNames(req.candidate, blockedTokens);
 
-  // Suggest safer classes — among the intended classes, count CRITICAL/
-  // HIGH findings per class. If one class is hot and a related class is
-  // cold, suggest the cold one. (Caveat: legally meaningful class shifts
-  // require matching the actual goods/services — surface that in the UI.)
   const hotClasses = new Map<number, number>();
   for (const f of findings) {
     if (f.level !== "CRITICAL" && f.level !== "HIGH") continue;
@@ -179,14 +243,12 @@ export async function checkAvailability(
           saferClasses.push({
             class: rel,
             heading: c.heading,
-            reason: `Class ${ic} has ${hotInIntended} high-risk hit${hotInIntended === 1 ? "" : "s"}; Class ${rel} has ${hotInRel}. Consider whether your goods/services genuinely sit in Class ${rel} — class shift only works if the actual product description matches.`,
+            reason: `Class ${ic} has ${hotInIntended} high-risk hit${hotInIntended === 1 ? "" : "s"}; Class ${rel} has ${hotInRel}. Class shift only works if your goods/services actually fit Class ${rel}.`,
           });
         }
       }
     }
   }
-
-  // Cap suggestions.
   saferClasses.splice(5);
 
   if (intended.length === 0 && detected.length === 0) {
@@ -196,15 +258,16 @@ export async function checkAvailability(
   }
 
   return {
-    candidate: variants.primary,
+    candidate: req.candidate.trim(),
     intendedClasses: intended,
     detectedClasses: detected,
     overall,
     findings,
     alternativeNames,
     saferClasses,
-    searchedQueries: variants.queries,
-    rawHitCount,
+    searchedClasses: intended,
+    totalAvailable,
+    fetched,
     source: actualSource,
     liveApiError,
     warnings,

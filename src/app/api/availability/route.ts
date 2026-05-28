@@ -9,28 +9,32 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  if (!body.candidate && !body.imageKeywords) {
     return NextResponse.json(
-      { error: "Invalid JSON body" },
+      { error: "Provide either 'candidate' (string) or 'imageKeywords' (string)." },
       { status: 400 }
     );
   }
 
-  if (!body.candidate || typeof body.candidate !== "string") {
-    return NextResponse.json(
-      { error: "Field 'candidate' (string) is required." },
-      { status: 400 }
-    );
-  }
-
-  if (body.candidate.length > 120) {
+  if (body.candidate && body.candidate.length > 120) {
     return NextResponse.json(
       { error: "Candidate too long (max 120 chars)." },
       { status: 400 }
     );
   }
 
+  if (body.imageKeywords && body.imageKeywords.length > 400) {
+    return NextResponse.json(
+      { error: "imageKeywords too long (max 400 chars)." },
+      { status: 400 }
+    );
+  }
+
   const report = await checkAvailability({
-    candidate: body.candidate,
+    candidate: body.candidate || "",
     intendedClasses: Array.isArray(body.intendedClasses)
       ? body.intendedClasses.filter((n) => typeof n === "number")
       : undefined,
@@ -38,6 +42,8 @@ export async function POST(req: NextRequest) {
       typeof body.productDescription === "string"
         ? body.productDescription
         : undefined,
+    imageKeywords:
+      typeof body.imageKeywords === "string" ? body.imageKeywords : undefined,
     forceMock: body.forceMock === true,
   });
 

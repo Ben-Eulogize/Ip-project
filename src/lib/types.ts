@@ -9,6 +9,13 @@ export type NormalisedTrademark = {
   regDate: string | null;
   jurisdiction: string;
   externalUrl: string | null;
+  // Visual: thumbnail URLs from IPAU's CDN (figurative marks), and the
+  // human-readable image description (Vienna-classification keywords).
+  imageUrls: string[];
+  imageDescription: string[];
+  // Mark kinds: WORD, FIGURATIVE, COLOUR, SHAPE, SOUND, etc. — useful for
+  // distinguishing word-only marks from logos.
+  kinds: string[];
   rawData: Record<string, unknown>;
 };
 
