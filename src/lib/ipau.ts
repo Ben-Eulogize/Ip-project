@@ -47,7 +47,9 @@ async function getToken(): Promise<TokenResult> {
 function findArray(obj: unknown): unknown[] {
   if (Array.isArray(obj)) return obj;
   if (obj && typeof obj === "object") {
-    for (const key of ["tradeMarks", "results", "data", "body"]) {
+    // trademarkIds is the canonical key on the live /search/quick
+    // response — array of numeric-string app numbers.
+    for (const key of ["trademarkIds", "tradeMarks", "results", "data", "body"]) {
       const val = (obj as Record<string, unknown>)[key];
       if (Array.isArray(val)) return val;
     }
@@ -75,6 +77,60 @@ function extractNumber(item: unknown): string | null {
   return null;
 }
 
+// Detail-fetch budget per variant query. Total per check ≈
+// (per-variant detail count) × (variant count) + (variant count for
+// search calls). With ~4 variants × 30 details + 4 searches = ~124
+// requests vs the 600/min SLA on the Base Tier.
+const DETAIL_LIMIT_PER_DIRECTION = 15;
+
+// Sort directions to fan out — captures both new pending applications
+// (DESCENDING by app number = newest first) and long-standing registered
+// marks (ASCENDING = oldest first). For brand-name searches like
+// "PAULS" with 500+ hits, NUMBER-descending alone misses 1990s-era
+// registrations that are often the strongest legal conflicts.
+type SortDir = "ASCENDING" | "DESCENDING";
+
+async function searchOnce(
+  token: string,
+  term: string,
+  direction: SortDir
+): Promise<{ ids: string[]; error?: string }> {
+  const res = await fetch(`${BASE_URL}/search/quick`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      query: term,
+      // Filter at search time to live/pending — REMOVED, REFUSED, and
+      // NEVER_REGISTERED add noise that the risk scorer would weight to
+      // MINIMAL anyway. Saves ~50% of detail-fetch budget on common
+      // queries.
+      filters: {
+        quickSearchType: ["WORD"],
+        status: ["REGISTERED", "PENDING"],
+      },
+      sort: { field: "NUMBER", direction },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    return {
+      ids: [],
+      error: `IP Australia search failed (${res.status}): ${body || res.statusText}`,
+    };
+  }
+  const data = await res.json();
+  const arr = findArray(data);
+  const ids = arr
+    .map(extractNumber)
+    .filter((n): n is string => n !== null)
+    .slice(0, DETAIL_LIMIT_PER_DIRECTION);
+  return { ids };
+}
+
 export async function searchIPAU(term: string): Promise<{
   results: NormalisedTrademark[];
   error?: string;
@@ -99,35 +155,23 @@ export async function searchIPAU(term: string): Promise<{
 
     const token = tokenResult.token;
 
-    const searchRes = await fetch(`${BASE_URL}/search/quick`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        query: term,
-        filters: { quickSearchType: ["WORD"] },
-        sort: { field: "NUMBER", direction: "DESCENDING" },
-      }),
-    });
+    // Two-direction sweep: oldest registered marks + newest pending apps.
+    const [descRes, ascRes] = await Promise.all([
+      searchOnce(token, term, "DESCENDING"),
+      searchOnce(token, term, "ASCENDING"),
+    ]);
 
-    if (!searchRes.ok) {
-      const errorBody = await searchRes.text().catch(() => "");
-      console.error(`[IPAU] Search failed: ${searchRes.status}`, errorBody);
-      return {
-        results: [],
-        error: `IP Australia search failed (${searchRes.status}): ${errorBody || searchRes.statusText}`,
-      };
+    if (descRes.error && ascRes.error) {
+      return { results: [], error: descRes.error };
     }
 
-    const searchData = await searchRes.json();
-    const arr = findArray(searchData);
-    const numbers = arr
-      .map(extractNumber)
-      .filter((n): n is string => n !== null)
-      .slice(0, 20);
+    const seenIds = new Set<string>();
+    const numbers: string[] = [];
+    for (const id of [...descRes.ids, ...ascRes.ids]) {
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      numbers.push(id);
+    }
 
     if (numbers.length === 0) {
       return { results: [] };
@@ -171,42 +215,78 @@ function normalise(
   record: Record<string, unknown>,
   fallbackNumber: string
 ): NormalisedTrademark {
+  // Real IPAU /trade-mark/{n} response uses `number` (numeric), `words`
+  // (array of mark text strings), `owner` (array of {name,...}),
+  // `statusGroup` + `statusCode` + `statusDetail`, and `goodsAndServices`
+  // (array of {class, descriptionText}). Fields fall through to other
+  // names defensively in case the API ever changes.
+
   const appNumber = String(
-    record.applicationNumber || record.number || fallbackNumber
+    record.number || record.applicationNumber || fallbackNumber
   );
 
-  const applicants = record.applicants as Array<{ name?: string }> | undefined;
-  const owners = record.owners as Array<{ name?: string }> | undefined;
-  const ownerObj = record.owner as { name?: string } | undefined;
+  // Mark name: prefer joined `words`, fall back to legacy keys.
+  const words = record.words as string[] | undefined;
+  const markName =
+    (Array.isArray(words) && words.length ? words.join(" / ") : "") ||
+    String(record.name || record.wordMark || record.tradeMarkName || "") ||
+    "(no word mark)";
 
-  const gsClasses = (record.goodsAndServicesClasses || []) as Array<
-    { classNumber?: unknown } | number | string
-  >;
+  // Owner: `owner` is an array of party objects, OR (legacy) a single
+  // object or `applicants` / `owners` arrays.
+  const ownerArr =
+    (Array.isArray(record.owner) ? (record.owner as Array<{ name?: string }>) : undefined) ||
+    (record.owners as Array<{ name?: string }> | undefined) ||
+    (record.applicants as Array<{ name?: string }> | undefined);
+  const ownerSingle = !Array.isArray(record.owner)
+    ? (record.owner as { name?: string } | undefined)
+    : undefined;
+  const owner =
+    ownerArr?.[0]?.name || ownerSingle?.name || "Unknown";
+
+  // Status: prefer statusGroup (REGISTERED/PENDING/REMOVED/REFUSED/
+  // NEVER_REGISTERED) and tack on statusDetail when present so the UI
+  // shows e.g. "REGISTERED — Registered: registered/protected".
+  const statusGroup = record.statusGroup ? String(record.statusGroup) : "";
+  const statusDetail = record.statusDetail ? String(record.statusDetail) : "";
+  const status =
+    [statusGroup, statusDetail].filter(Boolean).join(" — ") ||
+    String(record.status || "UNKNOWN");
+
+  // Nice classes: from goodsAndServices[].class, deduped, sorted numeric.
+  const gAndS =
+    (record.goodsAndServices as Array<{ class?: unknown }> | undefined) || [];
+  const niceClasses = Array.from(
+    new Set(
+      gAndS
+        .map((g) => g?.class)
+        .filter((c) => c != null && c !== "")
+        .map(String)
+    )
+  ).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+
+  // Dates: lodgementDate / filingDate are usually the same; pick one.
+  // enteredOnRegisterDate or registeredFromDate marks registration.
+  const appDate =
+    (record.lodgementDate as string | null) ||
+    (record.filingDate as string | null) ||
+    (record.applicationDate as string | null) ||
+    null;
+  const regDate =
+    (record.enteredOnRegisterDate as string | null) ||
+    (record.registeredFromDate as string | null) ||
+    (record.registrationDate as string | null) ||
+    null;
 
   return {
     id: `AU-${appNumber}`,
     source: "IPAU",
-    markName:
-      String(record.name || record.wordMark || record.tradeMarkName || "") ||
-      "(no word mark)",
-    owner:
-      applicants?.[0]?.name ||
-      owners?.[0]?.name ||
-      ownerObj?.name ||
-      "Unknown",
-    status: String(record.status || "UNKNOWN"),
-    niceClasses: gsClasses
-      .map((c) => {
-        if (typeof c === "object" && c !== null)
-          return (c as { classNumber?: unknown }).classNumber;
-        return c;
-      })
-      .filter(Boolean)
-      .map(String),
-    appDate: (record.applicationDate || record.filingDate || null) as
-      | string
-      | null,
-    regDate: (record.registrationDate || null) as string | null,
+    markName,
+    owner,
+    status,
+    niceClasses,
+    appDate,
+    regDate,
     jurisdiction: "AU",
     externalUrl: `https://search.ipaustralia.gov.au/trademarks/search/view/${appNumber}/details`,
     rawData: record,

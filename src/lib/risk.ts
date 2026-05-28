@@ -21,40 +21,46 @@ export type RiskFinding = {
   statusWeight: "live" | "pending" | "expired" | "unknown";
 };
 
-// Status strings IPAU returns. Anything that means "still has force in
-// the marketplace" counts as live for our risk purposes.
+// Status strings IPAU returns. The live API uses statusGroup uppercase
+// values (REGISTERED / PENDING / REMOVED / REFUSED / NEVER_REGISTERED)
+// joined with a human statusDetail ("Registered: registered/protected",
+// "Under examination", etc). Matching is case-insensitive substring.
 const LIVE_STATUSES = [
-  "registered",
-  "registered/protected",
-  "registered: registered",
+  "registered", // covers "REGISTERED" + "Registered: registered/protected"
   "live",
   "accepted",
   "advertised",
+  "protected",
 ];
 
 const PENDING_STATUSES = [
-  "pending",
+  "pending", // covers statusGroup PENDING
   "filed",
   "under examination",
   "examination",
   "indexed",
+  "published",
 ];
 
 const EXPIRED_STATUSES = [
   "expired",
   "lapsed",
   "withdrawn",
-  "refused",
+  "refused",        // statusGroup REFUSED
   "abandoned",
-  "removed",
+  "removed",        // statusGroup REMOVED
   "ceased",
+  "never_registered", // statusGroup NEVER_REGISTERED
+  "never registered",
 ];
 
 function classifyStatus(s: string): "live" | "pending" | "expired" | "unknown" {
   const lw = s.toLowerCase().trim();
-  if (LIVE_STATUSES.some((x) => lw.includes(x))) return "live";
-  if (PENDING_STATUSES.some((x) => lw.includes(x))) return "pending";
+  // EXPIRED is checked first because "never_registered" contains the
+  // substring "registered" and would otherwise be mis-classified as live.
   if (EXPIRED_STATUSES.some((x) => lw.includes(x))) return "expired";
+  if (PENDING_STATUSES.some((x) => lw.includes(x))) return "pending";
+  if (LIVE_STATUSES.some((x) => lw.includes(x))) return "live";
   return "unknown";
 }
 
