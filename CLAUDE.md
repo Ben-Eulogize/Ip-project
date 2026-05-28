@@ -49,3 +49,7 @@ Vercel auto-deploys `main`. Env vars `IPAU_CLIENT_ID` and `IPAU_CLIENT_SECRET` m
 - Don't reintroduce silent fallbacks for auth failures.
 - Don't add EUIPO, USPTO, or other jurisdictions without an explicit ask — scope is IP Australia only.
 - The IPAU response shape is loosely defended (`findArray`, `extractNumber`, `normalise`) because the field names aren't fully pinned down. If you see real records, tighten the types rather than adding more fallback keys.
+
+## Communication preferences
+
+- Always fill in concrete values, not placeholders. Real repo name (`Ben-Eulogize/Ip-project`), real branch (`claude/compassionate-goodall-JuP2I`), real URLs, real file paths. Make every command copy-paste-runnable as-is. No `<repo>`, `<branch>`, `<your-thing>`, `path/to/file`, etc. — fill them.
