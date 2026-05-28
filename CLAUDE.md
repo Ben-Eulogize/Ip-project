@@ -1,7 +1,10 @@
 # TM Researcher
 
 Availability + batch trademark search tool. **Primary** flow is the
-risk-classified availability checker; batch search is the older raw flow.
+risk-classified availability checker (text + logo); batch search is the
+older raw flow.
+
+**Live at:** https://ip-project-seven.vercel.app
 
 - **Web app** (Next.js 14, App Router) — deployed on Vercel.
   - `/` — availability checker: enter one candidate name + product
@@ -17,25 +20,43 @@ risk-classified availability checker; batch search is the older raw flow.
 Both call IP Australia's public Trade Mark Search API (OAuth client
 credentials).
 
-## Live API gotcha — subscription required
+## Two separate auth steps required (lesson learned)
 
-The token endpoint accepts the credentials and returns a valid JWT
-(`scope: B2B`, `aud: api.ipaustralia.gov.au`, `customer_id:
-OMJ8368626521`) — but the actual search/detail endpoints reject with
-`403 Invalid Client` until the client (`b2b_ipLookup_prod`) is
-subscribed to the **Trade Mark Search API product** in the portal.
+OAuth credentials alone are not enough. The IP Australia portal has
+TWO independent auth layers:
 
-**Unblock step** (one-time):
+1. **Client app** (gives you `client_id` / `client_secret`) — done at
+   account creation. Lets you fetch an OAuth token from
+   `/external-token-api/v1/access_token`.
+2. **API contract** — per-app-per-product subscription you must create
+   separately by visiting the API product page in the portal, clicking
+   "Request Access", picking Production instance + Base Tier + your
+   client app. Auto-approved instantly. **Without this contract, every
+   endpoint returns `403 Invalid Client` even though the token issued
+   cleanly.**
 
-1. Sign in at https://portal.api.ipaustralia.gov.au
-2. Navigate to API Products
-3. Subscribe the `b2b_ipLookup_prod` app to the Trade Mark Search API
-4. Wait a few minutes for propagation, re-run `npm run check`
+The portal: https://portal.api.ipaustralia.gov.au → APIs →
+Australian Trade Mark Search API → Request Access → Production / Base
+Tier (600 req/min) / select `b2b_ipLookup_prod`.
 
-Until that lands, every search auto-falls-back to a small demo fixture
-(`src/lib/mock-data.ts`) so the prototype is still demonstrable. A
-yellow "Demo data mode" banner shows in the UI, and the CLI prints the
-diagnostic in the warnings block.
+If the live API returns 403 again (e.g. the contract is removed), the
+app auto-falls-back to a demo fixture in `src/lib/mock-data.ts` with a
+yellow banner in the UI.
+
+## Vision auto-extraction (for logo upload)
+
+The logo-upload flow calls `/api/extract-image-keywords` which invokes
+Claude Haiku 4.5 to extract Vienna-style visual element keywords from
+the uploaded image (STAR, CIRCLE, RED, etc), then passes those into
+IPAU's `image.text` advanced-search field.
+
+This requires `ANTHROPIC_API_KEY` in Vercel env vars. Without it, the
+endpoint returns 503 with a clear "type keywords manually" prompt and
+the UI degrades gracefully — users can still type the visual elements
+themselves to drive the image search.
+
+To enable: `vercel env add ANTHROPIC_API_KEY production` (and preview)
+with a key from console.anthropic.com.
 
 ## Layout
 
