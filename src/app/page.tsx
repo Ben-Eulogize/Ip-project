@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useMemo, useRef } from "react";
 import type { AvailabilityReport } from "@/lib/availability";
-import { NICE_CLASSES, formatClass, detectClasses } from "@/lib/nice-classes";
+import { NICE_CLASSES, formatClass } from "@/lib/nice-classes";
 import { LEVEL_COLORS, RiskLevel } from "@/lib/risk";
 
 function csvEscape(val: string): string {
@@ -39,7 +39,6 @@ type FormState = {
   candidate: string;
   productDescription: string;
   selectedClasses: number[];
-  classMode: "auto" | "manual";
   imageKeywords: string;
 };
 
@@ -48,14 +47,12 @@ export default function Home() {
     candidate: "",
     productDescription: "",
     selectedClasses: [],
-    classMode: "auto",
     imageKeywords: "",
   });
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<AvailabilityReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showAllFindings, setShowAllFindings] = useState(false);
-  const [suggestNote, setSuggestNote] = useState<string | null>(null);
 
   // Image-upload state
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -80,10 +77,8 @@ export default function Home() {
           candidate: form.candidate.trim(),
           productDescription: form.productDescription.trim() || undefined,
           imageKeywords: form.imageKeywords.trim() || undefined,
-          intendedClasses:
-            form.classMode === "manual" && form.selectedClasses.length > 0
-              ? form.selectedClasses
-              : undefined,
+          intendedClasses: form.selectedClasses,
+          autoDetectClasses: false,
         }),
       });
       if (!res.ok) {
@@ -150,31 +145,6 @@ export default function Home() {
     if (showAllFindings) return report.findings;
     return report.findings.slice(0, 15);
   }, [report, showAllFindings]);
-
-  const suggestClasses = useCallback(() => {
-    const text = `${form.productDescription} ${form.candidate}`.trim();
-    if (!text) {
-      setSuggestNote("Type a name or description first.");
-      return;
-    }
-    const detected = detectClasses(text);
-    if (detected.length === 0) {
-      setSuggestNote(
-        "No classes detected from that wording. Tick manually, or add product words (e.g. 'gin', 'software', 'clothing')."
-      );
-      setForm((s) => ({ ...s, classMode: "manual" }));
-      return;
-    }
-    const picked = detected.slice(0, 4);
-    setForm((s) => ({
-      ...s,
-      classMode: "manual",
-      selectedClasses: [...picked].sort((a, b) => a - b),
-    }));
-    setSuggestNote(
-      `Suggested ${picked.map((n) => `Cl ${n}`).join(", ")} - review the ticks, then check.`
-    );
-  }, [form.productDescription, form.candidate]);
 
   const downloadReportCSV = useCallback(() => {
     if (!report) return;
@@ -304,7 +274,8 @@ export default function Home() {
                   className="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-slate-900 placeholder-slate-400"
                 />
                 <p className="text-xs text-slate-500 mt-1">
-                  Used to auto-detect Nice classes for the risk score.
+                  Context for the report. Pick the classes to search on the
+                  right.
                 </p>
               </div>
 
@@ -403,70 +374,41 @@ export default function Home() {
                 <span className="text-sm font-medium text-slate-700">
                   Nice classes
                 </span>
-                <div className="flex text-xs gap-1 bg-slate-100 rounded-md p-0.5">
+                {form.selectedClasses.length > 0 && (
                   <button
+                    type="button"
                     onClick={() =>
-                      setForm((s) => ({ ...s, classMode: "auto" }))
+                      setForm((s) => ({ ...s, selectedClasses: [] }))
                     }
-                    className={`px-2 py-1 rounded ${
-                      form.classMode === "auto"
-                        ? "bg-white shadow-sm text-slate-900"
-                        : "text-slate-500"
-                    }`}
+                    className="text-xs text-blue-600 hover:underline"
                   >
-                    Auto
+                    Clear ({form.selectedClasses.length})
                   </button>
-                  <button
-                    onClick={() =>
-                      setForm((s) => ({ ...s, classMode: "manual" }))
-                    }
-                    className={`px-2 py-1 rounded ${
-                      form.classMode === "manual"
-                        ? "bg-white shadow-sm text-slate-900"
-                        : "text-slate-500"
-                    }`}
-                  >
-                    Manual
-                  </button>
-                </div>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={suggestClasses}
-                disabled={!form.candidate.trim() && !form.productDescription.trim()}
-                className="mt-2 w-full px-3 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Suggest classes from description
-              </button>
-              {suggestNote && (
-                <p className="text-xs text-emerald-700 mt-1.5">{suggestNote}</p>
-              )}
-              {form.classMode === "auto" ? (
-                <p className="text-xs text-slate-500 mt-2">
-                  Classes auto-detected at search time. Or hit Suggest to
-                  prefill ticks you can review.
-                </p>
-              ) : (
-                <div className="mt-2 max-h-64 overflow-y-auto border border-slate-200 rounded-md p-2 text-xs space-y-1 bg-slate-50">
-                  {NICE_CLASSES.map((c) => (
-                    <label
-                      key={c.number}
-                      className="flex items-start gap-2 cursor-pointer hover:bg-white px-1 py-0.5 rounded"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={form.selectedClasses.includes(c.number)}
-                        onChange={() => toggleClass(c.number)}
-                        className="mt-0.5"
-                      />
-                      <span className="text-slate-700">
-                        <span className="font-medium">Cl. {c.number}</span> —{" "}
-                        {c.heading}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
+              <p className="text-xs text-slate-500 mt-1">
+                Tick the classes to check. None ticked = search without a
+                class filter.
+              </p>
+              <div className="mt-2 max-h-64 overflow-y-auto border border-slate-200 rounded-md p-2 text-xs space-y-1 bg-slate-50">
+                {NICE_CLASSES.map((c) => (
+                  <label
+                    key={c.number}
+                    className="flex items-start gap-2 cursor-pointer hover:bg-white px-1 py-0.5 rounded"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={form.selectedClasses.includes(c.number)}
+                      onChange={() => toggleClass(c.number)}
+                      className="mt-0.5"
+                    />
+                    <span className="text-slate-700">
+                      <span className="font-medium">Cl. {c.number}</span>{" "}
+                      - {c.heading}
+                    </span>
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
 

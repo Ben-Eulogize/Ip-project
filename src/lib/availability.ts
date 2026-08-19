@@ -19,6 +19,10 @@ export type AvailabilityRequest = {
   // Vienna-style descriptors — e.g. "STAR,CIRCLE,RED". When set, an
   // additional image-search row is added to the advanced query.
   imageKeywords?: string;
+  // When false, NO class auto-detection happens: the caller's
+  // intendedClasses (possibly empty = unrestricted) are used as-is.
+  // Defaults to true so the CLI and batch-check keep their detection.
+  autoDetectClasses?: boolean;
   forceMock?: boolean;
 };
 
@@ -63,6 +67,11 @@ function resolveClasses(req: AvailabilityRequest): {
   const detected = detectClasses(
     `${req.productDescription || ""} ${req.candidate}`
   );
+  if (req.autoDetectClasses === false) {
+    // Manual mode: what the user ticked is what gets searched. Empty
+    // means unrestricted, never a guess.
+    return { intended: req.intendedClasses ?? [], detected };
+  }
   const intended =
     req.intendedClasses && req.intendedClasses.length
       ? req.intendedClasses

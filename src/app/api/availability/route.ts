@@ -44,6 +44,7 @@ export async function POST(req: NextRequest) {
         : undefined,
     imageKeywords:
       typeof body.imageKeywords === "string" ? body.imageKeywords : undefined,
+    autoDetectClasses: body.autoDetectClasses,
     forceMock: body.forceMock === true,
   });
 
