@@ -8,7 +8,17 @@ older raw flow.
 
 - **Web app** (Next.js 14, App Router) — deployed on Vercel.
   - `/` — availability checker: enter one candidate name + product
-    description, get a risk-classified report.
+    description, get a risk-classified report. Has a "Suggest classes"
+    button that prefills the Nice-class tickboxes from the description
+    for human review, and CSV/JSON report downloads.
+  - `/batch-check` — batch availability: many candidate names, one
+    shared description, risk verdict per name. Downloads: summary CSV,
+    per-finding CSV, and an **AI-feed JSONL** (one self-contained record
+    per line with the IP Australia application number, image URLs and
+    ATMOSS link - built for piping into an external LLM pipeline).
+  - `/watch` — new-filing watch: keyword watchlist + lookback window,
+    returns recently filed applications risk-scored by the same engine.
+    The on-demand version of the CC-IP-Watch nightly digest idea.
   - `/batch` — batch search: paste many terms, get raw results +
     CSV/JSON export (kept for power-user / one-off research).
 - **CLI**:
@@ -108,9 +118,12 @@ product categories.
 
 - Token: `POST https://production.api.ipaustralia.gov.au/public/external-token-api/v1/access_token`,
   body `grant_type=client_credentials&client_id=…&client_secret=…`
-- Search: `POST .../australian-trade-mark-search-api/v1/search/quick`
-  with `{ query, sort: {field, direction}, filters: {quickSearchType} }`
-- Detail: `GET .../v1/trade-mark/{ipRightIdentifier}`
+- Search: `POST .../australian-trade-mark-search-api/v1/page/advanced`
+  with `{ pageSize, pageNumber, sort: {field, direction}, rows: [{op, query}] }`
+  - returns full detail records inline (no N+1 fan-out). Each row's
+  query supports word / image / classNumber / owner / statuses / kinds.
+  (An earlier version of this doc said `/search/quick` + a per-record
+  detail GET; the code moved to `/page/advanced` and never looked back.)
 - **Auth is mandatory** for every request — no unauthenticated path.
   Missing creds → fail fast.
 
@@ -140,16 +153,32 @@ CLI flags for `check`:
 
 ## Deployment
 
-Vercel auto-deploys `main`. Env vars `IPAU_CLIENT_ID` and
+There is **no `main` branch**. The Vercel project (`ip-project`,
+`prj_289BNd52yCaM1mRF1j3rDnJgbKnN`, team `team_RyzX6jtGZEmdOLxTUq5gBn6D`)
+deploys the working branch `claude/compassionate-goodall-JuP2I` to
+production - verified live 2026-08-19. Env vars `IPAU_CLIENT_ID` and
 `IPAU_CLIENT_SECRET` must be set in the Vercel project (Production +
 Preview). Same values as `.env.local` — verify they match if the live
-UI shows the demo banner unexpectedly.
+UI shows the demo banner unexpectedly. `ANTHROPIC_API_KEY` was absent
+from Production as of 2026-08-19, so logo extraction 503s there until
+it is added.
 
 ## Working branch
 
 `claude/compassionate-goodall-JuP2I` — has the availability checker,
 risk scorer, CLI, mock-fallback, and the API-subscription diagnostic.
 Not yet merged to `main` at time of writing.
+
+## Watch sweep recency (how /watch finds "new")
+
+`src/lib/watch.ts` does NOT send a `date` clause - the OAS spec
+advertises one but its wire shape is unverified here. It queries NUMBER
+DESCENDING (application numbers are broadly sequential), paginates up to
+3×100 records per keyword, and post-filters by `appDate` against the
+cutoff. If every page is still in-window at the cap, the keyword is
+reported in `truncated` rather than silently cut. If someone later
+verifies the real `date` clause shape against the OAS spec, swapping it
+in removes the pagination entirely.
 
 ## Conventions
 

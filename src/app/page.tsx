@@ -2,8 +2,15 @@
 
 import { useState, useCallback, useMemo, useRef } from "react";
 import type { AvailabilityReport } from "@/lib/availability";
-import { NICE_CLASSES, formatClass } from "@/lib/nice-classes";
+import { NICE_CLASSES, formatClass, detectClasses } from "@/lib/nice-classes";
 import { LEVEL_COLORS, RiskLevel } from "@/lib/risk";
+
+function csvEscape(val: string): string {
+  if (val.includes(",") || val.includes('"') || val.includes("\n")) {
+    return `"${val.replace(/"/g, '""')}"`;
+  }
+  return val;
+}
 
 const OVERALL_COPY: Record<RiskLevel, { headline: string; sub: string }> = {
   CRITICAL: {
@@ -48,6 +55,7 @@ export default function Home() {
   const [report, setReport] = useState<AvailabilityReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showAllFindings, setShowAllFindings] = useState(false);
+  const [suggestNote, setSuggestNote] = useState<string | null>(null);
 
   // Image-upload state
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -143,6 +151,72 @@ export default function Home() {
     return report.findings.slice(0, 15);
   }, [report, showAllFindings]);
 
+  const suggestClasses = useCallback(() => {
+    const text = `${form.productDescription} ${form.candidate}`.trim();
+    if (!text) {
+      setSuggestNote("Type a name or description first.");
+      return;
+    }
+    const detected = detectClasses(text);
+    if (detected.length === 0) {
+      setSuggestNote(
+        "No classes detected from that wording. Tick manually, or add product words (e.g. 'gin', 'software', 'clothing')."
+      );
+      setForm((s) => ({ ...s, classMode: "manual" }));
+      return;
+    }
+    const picked = detected.slice(0, 4);
+    setForm((s) => ({
+      ...s,
+      classMode: "manual",
+      selectedClasses: [...picked].sort((a, b) => a - b),
+    }));
+    setSuggestNote(
+      `Suggested ${picked.map((n) => `Cl ${n}`).join(", ")} - review the ticks, then check.`
+    );
+  }, [form.productDescription, form.candidate]);
+
+  const downloadReportCSV = useCallback(() => {
+    if (!report) return;
+    const headers = [
+      "level", "score", "markName", "applicationNumber", "owner", "status",
+      "niceClasses", "filed", "registered", "kinds", "imageUrls",
+      "imageDescription", "reasons", "atmossUrl",
+    ];
+    const rows = report.findings.map((f) =>
+      [
+        f.level, String(f.score), f.trademark.markName,
+        f.trademark.id.replace(/^AU-/, ""),
+        f.trademark.owner, f.trademark.status,
+        f.trademark.niceClasses.join("; "),
+        f.trademark.appDate || "", f.trademark.regDate || "",
+        f.trademark.kinds.join("; "),
+        f.trademark.imageUrls.join(" "),
+        f.trademark.imageDescription.join("; "),
+        f.reasons.join(" | "), f.trademark.externalUrl || "",
+      ].map(csvEscape).join(",")
+    );
+    const meta = `# candidate: ${report.candidate} | overall: ${report.overall} | classes: ${report.searchedClasses.join(" ")} | source: ${report.source}`;
+    const blob = new Blob([[meta, headers.join(","), ...rows].join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tm-availability-${report.candidate.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "report"}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [report]);
+
+  const downloadReportJSON = useCallback(() => {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tm-availability-${report.candidate.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "report"}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [report]);
+
   const toggleClass = (n: number) => {
     setForm((s) => ({
       ...s,
@@ -162,10 +236,18 @@ export default function Home() {
           <p className="text-sm text-slate-500 mt-1">
             IP Australia — risk-classified screening for a candidate brand
             name + logo.{" "}
-            <a href="/batch" className="text-blue-600 hover:underline">
-              Batch search
+            <a href="/batch-check" className="text-blue-600 hover:underline">
+              Batch check
+            </a>
+            ,{" "}
+            <a href="/watch" className="text-blue-600 hover:underline">
+              New-filing watch
             </a>{" "}
-            is also available.
+            and{" "}
+            <a href="/batch" className="text-blue-600 hover:underline">
+              batch search
+            </a>{" "}
+            are also available.
           </p>
         </div>
       </header>
@@ -348,9 +430,21 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={suggestClasses}
+                disabled={!form.candidate.trim() && !form.productDescription.trim()}
+                className="mt-2 w-full px-3 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Suggest classes from description
+              </button>
+              {suggestNote && (
+                <p className="text-xs text-emerald-700 mt-1.5">{suggestNote}</p>
+              )}
               {form.classMode === "auto" ? (
                 <p className="text-xs text-slate-500 mt-2">
-                  Classes detected from the candidate + description.
+                  Classes auto-detected at search time. Or hit Suggest to
+                  prefill ticks you can review.
                 </p>
               ) : (
                 <div className="mt-2 max-h-64 overflow-y-auto border border-slate-200 rounded-md p-2 text-xs space-y-1 bg-slate-50">
@@ -495,16 +589,34 @@ export default function Home() {
                       ({report.findings.length})
                     </span>
                   </h3>
-                  {report.findings.length > 15 && (
-                    <button
-                      onClick={() => setShowAllFindings((v) => !v)}
-                      className="text-xs text-blue-600 hover:underline"
-                    >
-                      {showAllFindings
-                        ? "Show top 15"
-                        : `Show all ${report.findings.length}`}
-                    </button>
-                  )}
+                  <div className="flex items-center gap-3">
+                    {report.findings.length > 0 && (
+                      <>
+                        <button
+                          onClick={downloadReportCSV}
+                          className="text-xs text-blue-600 hover:underline"
+                        >
+                          Download CSV
+                        </button>
+                        <button
+                          onClick={downloadReportJSON}
+                          className="text-xs text-blue-600 hover:underline"
+                        >
+                          JSON
+                        </button>
+                      </>
+                    )}
+                    {report.findings.length > 15 && (
+                      <button
+                        onClick={() => setShowAllFindings((v) => !v)}
+                        className="text-xs text-blue-600 hover:underline"
+                      >
+                        {showAllFindings
+                          ? "Show top 15"
+                          : `Show all ${report.findings.length}`}
+                      </button>
+                    )}
+                  </div>
                 </header>
                 {report.findings.length === 0 ? (
                   <div className="px-5 py-8 text-sm text-slate-500 text-center">

@@ -9,9 +9,9 @@ const geistSans = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "TM Researcher — Trademark Batch Search",
+  title: "TM Researcher — AU Trademark Tools",
   description:
-    "Batch search Australian and EU trademark databases with AI landscape reports",
+    "Risk-classified availability checking, batch screening and a new-filing watch over IP Australia's trademark register",
 };
 
 export default function RootLayout({

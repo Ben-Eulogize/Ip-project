@@ -111,6 +111,9 @@ export type AdvancedSearchInput = {
   // Restrict to live/pending by default; expand if caller passes otherwise.
   statuses?: AdvancedStatus[];
   pageSize?: number;
+  // Zero-based page for walking deeper into NUMBER-DESC results (the
+  // watch sweep paginates until it crosses its date cutoff).
+  pageNumber?: number;
 };
 
 /**
@@ -167,7 +170,7 @@ export async function searchAdvanced(
 
   const body = {
     pageSize,
-    pageNumber: 0,
+    pageNumber: input.pageNumber ?? 0,
     sort: { field: "NUMBER", direction: "DESCENDING" as const },
     rows,
   };

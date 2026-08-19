@@ -77,6 +77,14 @@ export default function Home() {
               </h1>
               <p className="text-sm text-gray-500 mt-1">
                 Raw IP Australia search for a list of terms.{" "}
+                <a href="/batch-check" className="text-blue-600 hover:underline">
+                  Batch check
+                </a>{" "}
+                &middot;{" "}
+                <a href="/watch" className="text-blue-600 hover:underline">
+                  Watch
+                </a>{" "}
+                &middot;{" "}
                 <a href="/" className="text-blue-600 hover:underline">
                   Availability checker
                 </a>{" "}
