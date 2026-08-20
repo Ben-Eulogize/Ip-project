@@ -53,6 +53,19 @@ export default function Home() {
   const [report, setReport] = useState<AvailabilityReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showAllFindings, setShowAllFindings] = useState(false);
+  // Ticked findings (by trademark id) for selective download. Empty = all.
+  const [selectedFindings, setSelectedFindings] = useState<Set<string>>(
+    new Set()
+  );
+
+  const toggleFinding = (id: string) => {
+    setSelectedFindings((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // Image-upload state
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -69,6 +82,7 @@ export default function Home() {
     setError(null);
     setReport(null);
     setShowAllFindings(false);
+    setSelectedFindings(new Set());
     try {
       const res = await fetch("/api/availability", {
         method: "POST",
@@ -146,6 +160,13 @@ export default function Home() {
     return report.findings.slice(0, 15);
   }, [report, showAllFindings]);
 
+  // What the download buttons export: ticked findings, or all when none.
+  const exportFindings = report
+    ? selectedFindings.size > 0
+      ? report.findings.filter((f) => selectedFindings.has(f.trademark.id))
+      : report.findings
+    : [];
+
   const downloadReportCSV = useCallback(() => {
     if (!report) return;
     const headers = [
@@ -153,7 +174,7 @@ export default function Home() {
       "niceClasses", "filed", "registered", "kinds", "imageUrls",
       "imageDescription", "reasons", "atmossUrl",
     ];
-    const rows = report.findings.map((f) =>
+    const rows = exportFindings.map((f) =>
       [
         f.level, String(f.score), f.trademark.markName,
         f.trademark.id.replace(/^AU-/, ""),
@@ -174,18 +195,18 @@ export default function Home() {
     a.download = `tm-availability-${report.candidate.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "report"}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [report]);
+  }, [report, exportFindings]);
 
   const downloadReportJSON = useCallback(() => {
     if (!report) return;
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ ...report, findings: exportFindings }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `tm-availability-${report.candidate.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "report"}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [report]);
+  }, [report, exportFindings]);
 
   const toggleClass = (n: number) => {
     setForm((s) => ({
@@ -538,7 +559,10 @@ export default function Home() {
                           onClick={downloadReportCSV}
                           className="text-xs text-blue-600 hover:underline"
                         >
-                          Download CSV
+                          Download CSV{" "}
+                          {selectedFindings.size > 0
+                            ? `(${exportFindings.length} ticked)`
+                            : `(all ${report.findings.length})`}
                         </button>
                         <button
                           onClick={downloadReportJSON}
@@ -569,6 +593,13 @@ export default function Home() {
                     {visibleFindings.map((f) => (
                       <li key={f.trademark.id} className="px-5 py-3">
                         <div className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            aria-label={`Include ${f.trademark.markName} in download`}
+                            className="mt-1 flex-shrink-0"
+                            checked={selectedFindings.has(f.trademark.id)}
+                            onChange={() => toggleFinding(f.trademark.id)}
+                          />
                           {f.trademark.imageUrls.length > 0 ? (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img

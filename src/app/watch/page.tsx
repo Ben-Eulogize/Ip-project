@@ -20,6 +20,17 @@ export default function WatchPage() {
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<WatchReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Ticked marks (by trademark id) for selective download. Empty = all.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const runSweep = useCallback(async () => {
     const keywords = keywordsText
@@ -54,12 +65,20 @@ export default function WatchPage() {
         return;
       }
       setReport((await res.json()) as WatchReport);
+      setSelected(new Set());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
   }, [keywordsText, days, classesText]);
+
+  // What the CSV exports: ticked matches, or everything when none ticked.
+  const exportMatches = report
+    ? selected.size > 0
+      ? report.matches.filter((m) => selected.has(m.finding.trademark.id))
+      : report.matches
+    : [];
 
   const downloadCSV = useCallback(() => {
     if (!report) return;
@@ -79,7 +98,7 @@ export default function WatchPage() {
       "reasons",
       "atmossUrl",
     ];
-    const rows = report.matches.map((m) =>
+    const rows = exportMatches.map((m) =>
       [
         m.keyword,
         m.finding.level,
@@ -108,7 +127,7 @@ export default function WatchPage() {
     a.download = `tm-watch-${report.cutoff}-to-today.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [report]);
+  }, [report, exportMatches]);
 
   return (
     <main className="min-h-screen bg-slate-50">
@@ -265,12 +284,35 @@ export default function WatchPage() {
                   </span>
                 </h3>
                 {report.matches.length > 0 && (
-                  <button
-                    onClick={downloadCSV}
-                    className="text-xs px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md font-medium"
-                  >
-                    Download CSV
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs text-slate-500 flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selected.size === report.matches.length}
+                        onChange={() =>
+                          setSelected(
+                            selected.size === report.matches.length
+                              ? new Set()
+                              : new Set(
+                                  report.matches.map(
+                                    (m) => m.finding.trademark.id
+                                  )
+                                )
+                          )
+                        }
+                      />
+                      all
+                    </label>
+                    <button
+                      onClick={downloadCSV}
+                      className="text-xs px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md font-medium"
+                    >
+                      Download CSV{" "}
+                      {selected.size > 0
+                        ? `(${exportMatches.length} ticked)`
+                        : `(all ${report.matches.length})`}
+                    </button>
+                  </div>
                 )}
               </header>
               {report.matches.length === 0 ? (
@@ -282,6 +324,15 @@ export default function WatchPage() {
                   {report.matches.map((m) => (
                     <li key={m.finding.trademark.id} className="px-5 py-3">
                       <div className="flex items-start gap-3">
+                        <input
+                          type="checkbox"
+                          aria-label={`Include ${m.finding.trademark.markName} in download`}
+                          className="mt-1 flex-shrink-0"
+                          checked={selected.has(m.finding.trademark.id)}
+                          onChange={() =>
+                            toggleSelected(m.finding.trademark.id)
+                          }
+                        />
                         <span
                           className={`flex-shrink-0 inline-block text-xs font-semibold px-2 py-0.5 rounded ${LEVEL_COLORS[m.finding.level].bg} ${LEVEL_COLORS[m.finding.level].text}`}
                         >

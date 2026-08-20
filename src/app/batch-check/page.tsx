@@ -42,6 +42,17 @@ export default function BatchCheckPage() {
   const [productDescription, setProductDescription] = useState("");
   const [rows, setRows] = useState<BatchRow[]>([]);
   const [running, setRunning] = useState(false);
+  // Ticked candidates for selective download. Empty = download everything.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const toggleSelected = (candidate: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(candidate)) next.delete(candidate);
+      else next.add(candidate);
+      return next;
+    });
+  };
 
   const runBatch = useCallback(async () => {
     const names = Array.from(
@@ -59,6 +70,7 @@ export default function BatchCheckPage() {
       status: "pending",
     }));
     setRows(initial);
+    setSelected(new Set());
     setRunning(true);
 
     // Sequential on purpose: each check fans out 2-4 IPAU calls itself,
@@ -113,6 +125,14 @@ export default function BatchCheckPage() {
   }, [namesText, productDescription]);
 
   const doneRows = rows.filter((r) => r.status === "done" && r.report);
+  // What the download buttons actually export: the ticked rows, or every
+  // completed row when nothing is ticked.
+  const exportRows =
+    selected.size > 0
+      ? doneRows.filter((r) => selected.has(r.candidate))
+      : doneRows;
+  const exportLabel =
+    selected.size > 0 ? ` (${exportRows.length} ticked)` : ` (all ${doneRows.length})`;
 
   const downloadSummaryCSV = useCallback(() => {
     const headers = [
@@ -126,7 +146,7 @@ export default function BatchCheckPage() {
       "classesSearched",
       "source",
     ];
-    const lines = doneRows.map((r) => {
+    const lines = exportRows.map((r) => {
       const rep = r.report!;
       const top = rep.findings[0];
       return [
@@ -148,7 +168,7 @@ export default function BatchCheckPage() {
       "text/csv",
       "tm-batch-availability.csv"
     );
-  }, [doneRows]);
+  }, [exportRows]);
 
   const downloadFindingsCSV = useCallback(() => {
     const headers = [
@@ -168,7 +188,7 @@ export default function BatchCheckPage() {
       "atmossUrl",
       "reasons",
     ];
-    const lines = doneRows.flatMap((r) =>
+    const lines = exportRows.flatMap((r) =>
       r.report!.findings.map((f) =>
         [
           r.report!.candidate,
@@ -196,14 +216,14 @@ export default function BatchCheckPage() {
       "text/csv",
       "tm-batch-findings.csv"
     );
-  }, [doneRows]);
+  }, [exportRows]);
 
   // AI-feed export: JSONL, one fully self-contained record per line, no
   // rawData blobs. Built for dropping straight into an LLM pipeline -
   // each line carries the IP Australia application number (the canonical
   // reference), image links for figurative marks, and the ATMOSS URL.
   const downloadJSONL = useCallback(() => {
-    const lines = doneRows.flatMap((r) => {
+    const lines = exportRows.flatMap((r) => {
       const rep = r.report!;
       return rep.findings.map((f) =>
         JSON.stringify({
@@ -234,7 +254,7 @@ export default function BatchCheckPage() {
       "application/jsonl",
       "tm-batch-ai-feed.jsonl"
     );
-  }, [doneRows]);
+  }, [exportRows]);
 
   return (
     <main className="min-h-screen bg-slate-50">
@@ -307,20 +327,20 @@ export default function BatchCheckPage() {
                   onClick={downloadSummaryCSV}
                   className="text-xs px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md font-medium"
                 >
-                  Summary CSV
+                  Summary CSV{exportLabel}
                 </button>
                 <button
                   onClick={downloadFindingsCSV}
                   className="text-xs px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md font-medium"
                 >
-                  Findings CSV
+                  Findings CSV{exportLabel}
                 </button>
                 <button
                   onClick={downloadJSONL}
                   className="text-xs px-3 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-md font-medium"
-                  title="One self-contained JSON record per line: application number, image links, ATMOSS URL, risk reasoning. Built for feeding an AI pipeline."
+                  title="One self-contained JSON record per line: application number, image links, ATMOSS URL, risk reasoning. Built for feeding an AI pipeline. Tick rows to export a subset; no ticks = everything."
                 >
-                  AI feed (JSONL)
+                  AI feed (JSONL){exportLabel}
                 </button>
               </>
             )}
@@ -339,6 +359,22 @@ export default function BatchCheckPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                  <th className="px-4 py-2 font-medium w-8">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all completed rows"
+                      checked={
+                        doneRows.length > 0 && selected.size === doneRows.length
+                      }
+                      onChange={() =>
+                        setSelected(
+                          selected.size === doneRows.length
+                            ? new Set()
+                            : new Set(doneRows.map((r) => r.candidate))
+                        )
+                      }
+                    />
+                  </th>
                   <th className="px-4 py-2 font-medium">Candidate</th>
                   <th className="px-4 py-2 font-medium">Verdict</th>
                   <th className="px-4 py-2 font-medium">Conflicts</th>
@@ -349,6 +385,15 @@ export default function BatchCheckPage() {
               <tbody className="divide-y divide-slate-100">
                 {rows.map((r) => (
                   <tr key={r.candidate}>
+                    <td className="px-4 py-2.5">
+                      <input
+                        type="checkbox"
+                        aria-label={`Include ${r.candidate} in download`}
+                        disabled={r.status !== "done"}
+                        checked={selected.has(r.candidate)}
+                        onChange={() => toggleSelected(r.candidate)}
+                      />
+                    </td>
                     <td className="px-4 py-2.5 font-medium text-slate-900">
                       {r.candidate}
                     </td>
